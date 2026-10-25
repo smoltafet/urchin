@@ -190,6 +190,70 @@ def unparse_origin(matrix: npt.ArrayLike) -> ET._Element:
     return node
 
 
+def resolve_package_uri(uri: str) -> str:
+    """Resolve a ``package://`` URI to a filesystem path.
+
+    URDF files in the ROS ecosystem typically reference meshes and
+    textures as ``package://<package>/<relative path>``. Without a ROS
+    installation, the package is located through the same environment
+    variables ROS tools use:
+
+    - ``ROS_PACKAGE_PATH``: a list of directories, each of which may
+      contain the package as a subdirectory.
+    - ``AMENT_PREFIX_PATH``: a list of install prefixes, where the
+      package lives under ``share/<package>``.
+
+    The first search path (in the order above) that contains the package
+    wins, matching ``rospkg`` semantics.
+
+    Parameters
+    ----------
+    uri : str
+        The ``package://`` URI to resolve.
+
+    Returns
+    -------
+    resolved : str
+        The filesystem path the URI points to. The file itself is not
+        required to exist; only the package directory must be found.
+
+    Raises
+    ------
+    ValueError
+        If the URI is malformed, escapes the package directory, or the
+        package cannot be found in either environment variable.
+    """
+    if not uri.startswith("package://"):
+        raise ValueError("Not a package URI: {!r}".format(uri))
+    package_name, _, relative_path = uri[len("package://") :].partition("/")
+    if not package_name or not relative_path:
+        raise ValueError(
+            "Invalid package URI {!r}: expected 'package://<package>/<path>'".format(uri)
+        )
+
+    candidates = []
+    for entry in os.environ.get("ROS_PACKAGE_PATH", "").split(os.pathsep):
+        if entry:
+            candidates.append(os.path.join(entry, package_name))
+    for entry in os.environ.get("AMENT_PREFIX_PATH", "").split(os.pathsep):
+        if entry:
+            candidates.append(os.path.join(entry, "share", package_name))
+
+    for package_dir in candidates:
+        if os.path.isdir(package_dir):
+            resolved = os.path.normpath(os.path.join(package_dir, relative_path))
+            if os.path.commonpath([package_dir, resolved]) != os.path.normpath(package_dir):
+                raise ValueError(
+                    "Invalid package URI {!r}: path escapes the package directory".format(uri)
+                )
+            return resolved
+
+    raise ValueError(
+        "Could not resolve {!r}: package '{}' was not found in "
+        "ROS_PACKAGE_PATH or AMENT_PREFIX_PATH".format(uri, package_name)
+    )
+
+
 def get_filename(base_path: str, file_path: str, makedirs: bool = False) -> str:
     """Formats a file path correctly for URDF loading.
 
@@ -198,7 +262,8 @@ def get_filename(base_path: str, file_path: str, makedirs: bool = False) -> str:
     base_path : str
         The base path to the URDF's folder.
     file_path : str
-        The path to the file.
+        The path to the file. This may also be a ``package://`` URI, in
+        which case it is resolved with :func:`resolve_package_uri`.
     makedirs : bool, optional
         If ``True``, the directories leading to the file will be created
         if needed.
@@ -210,7 +275,9 @@ def get_filename(base_path: str, file_path: str, makedirs: bool = False) -> str:
         absolute path, otherwise that path joined to ``base_path``.
     """
     fn = file_path
-    if not os.path.isabs(file_path):
+    if file_path.startswith("package://"):
+        fn = resolve_package_uri(file_path)
+    elif not os.path.isabs(file_path):
         fn = os.path.join(base_path, file_path)
     if makedirs:
         d, _ = os.path.split(fn)
